@@ -35,8 +35,8 @@ PALETA_DESTAQUE = [
 ]
 
 NIVEIS = ["materia", "nivel2", "nivel3", "nivel4", "nivel5"]
-OBRIGATORIAS = ["id_questao", "anulada", "orgao", "Cargo", "ano"] + NIVEIS
-CHAVES = {"f_orgao": "orgao", "f_cargo": "Cargo", "f_ano": "ano", "f_materia": "materia"}
+OBRIGATORIAS = ["id_questao", "anulada", "orgao", "Cargo", "ano", "escolaridade"] + NIVEIS
+CHAVES = {"f_escol": "escolaridade", "f_orgao": "orgao", "f_cargo": "Cargo", "f_ano": "ano", "f_materia": "materia"}
 
 CSS = """
 <style>
@@ -258,7 +258,7 @@ def universo(df, ignorar=None):
 
 
 def limpar_filtros():
-    for k in ("f_orgao", "f_cargo", "f_ano"):
+    for k in ("f_escol", "f_orgao", "f_cargo", "f_ano"):
         st.session_state[k] = []
     st.session_state["f_materia"] = "Todas"
     st.session_state["f_anuladas"] = True
@@ -266,7 +266,7 @@ def limpar_filtros():
 
 def barra_lateral(df):
     s = st.session_state
-    padroes = {"f_orgao": [], "f_cargo": [], "f_ano": [], "f_materia": "Todas",
+    padroes = {"f_escol": [], "f_orgao": [], "f_cargo": [], "f_ano": [], "f_materia": "Todas",
                "f_anuladas": True, "destaques": [], "pagina": "🥧 Pizza"}
     for k, v in padroes.items():
         s.setdefault(k, list(v) if isinstance(v, list) else v)
@@ -298,6 +298,7 @@ def barra_lateral(df):
         sb.multiselect(rotulo, sorted(cont.index.tolist(), key=ordem), key=chave,
                        format_func=lambda v: f"{v} ({cont[v]})", placeholder="Todos")
 
+    multi("Escolaridade", "f_escol", "Escolaridade", str)
     multi("Órgão", "f_orgao", "orgao", chave_orgao)
     multi("Cargo", "f_cargo", "Cargo", str)
     multi("Ano", "f_ano", "ano", lambda a: -a)
@@ -492,7 +493,7 @@ def bloco_tabelas(df_u):
     st.markdown("---")
     st.subheader("📋 Questões")
     mostra = pd.DataFrame({
-        "id_questao": df_u["id_questao"], "orgao": df_u["orgao"], "ano": df_u["ano"],
+        "id_questao": df_u["id_questao"], "escolaridade": df_u["Escolaridade"], "orgao": df_u["orgao"], "ano": df_u["ano"],
         "cargo": df_u["Cargo"], "matéria": df_u["materia"], "assunto_detalhado": df_u["assunto_detalhado"],
     })
     mostrar_df(mostra, hide_index=True, column_config={
