@@ -574,8 +574,8 @@ def main():
     html_md(CSS)
     st.title("📊 Painel Interativo de Questões")
     st.markdown(
-        "**Banco de dados de questões previamente tratadas com os seguintes filtros:**  \n"
-        "Banca: FCC  \nÓrgãos: TRT (1-24)  \nCargos: Técnico e Analista  \nEnsino: Superior"
+        "**Banco de dados de questões previamente tratado com os seguintes filtros:**  \n"
+        "Banca: FCC  \nÓrgãos: TRT (todos) \nCargos: Técnico e Analista"
     )
     try:
         df = carregar()
