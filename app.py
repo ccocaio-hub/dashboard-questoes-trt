@@ -298,7 +298,7 @@ def barra_lateral(df):
         sb.multiselect(rotulo, sorted(cont.index.tolist(), key=ordem), key=chave,
                        format_func=lambda v: f"{v} ({cont[v]})", placeholder="Todos")
 
-    multi("Escolaridade", "f_escol", "Escolaridade", str)
+    multi("Escolaridade", "f_escol", "escolaridade", str)
     multi("Órgão", "f_orgao", "orgao", chave_orgao)
     multi("Cargo", "f_cargo", "Cargo", str)
     multi("Ano", "f_ano", "ano", lambda a: -a)
@@ -493,7 +493,7 @@ def bloco_tabelas(df_u):
     st.markdown("---")
     st.subheader("📋 Questões")
     mostra = pd.DataFrame({
-        "id_questao": df_u["id_questao"], "escolaridade": df_u["Escolaridade"], "orgao": df_u["orgao"], "ano": df_u["ano"],
+        "id_questao": df_u["id_questao"], "escolaridade": df_u["escolaridade"], "orgao": df_u["orgao"], "ano": df_u["ano"],
         "cargo": df_u["Cargo"], "matéria": df_u["materia"], "assunto_detalhado": df_u["assunto_detalhado"],
     })
     mostrar_df(mostra, hide_index=True, column_config={
