@@ -7,6 +7,7 @@ Libs:    streamlit, pandas, openpyxl, plotly
 """
 import html
 import re
+from collections import Counter
 from io import BytesIO
 from pathlib import Path
 
@@ -131,6 +132,113 @@ def nos_assunto():
     return dict(sorted(vistos.items()))
 
 
+# ───────────────────────────── abreviações dos assuntos ─────────────────────────────
+MAX_CURTO = 18     # nomes (sem parênteses) até este tamanho ficam como estão
+MAX_ABREV = 18     # se a versão abreviada couber aqui, usa ela inteira; senão corta nas 1ªs palavras + "…"
+MIN_PALAVRAS = 2   # ao cortar, mantém pelo menos 2 palavras (ex.: "Dir. Adm…")
+
+STOP = {"de", "da", "do", "das", "dos", "e", "em", "na", "no", "nas", "nos", "a", "o", "as", "os",
+        "para", "por", "com", "ao", "à", "ou"}
+ABREV = {
+    "direito": "Dir.", "direitos": "Dir.", "administração": "Adm.", "administrativo": "Adm.",
+    "administrativa": "Adm.", "constitucional": "Const.", "geral": "Ger.", "pública": "Púb.",
+    "público": "Púb.", "públicos": "Púb.", "públicas": "Púb.", "legislação": "Legisl.",
+    "específica": "Espec.", "específico": "Espec.", "tribunais": "Trib.", "ministérios": "Min.",
+    "federais": "Fed.", "federal": "Fed.", "estadual": "Est.", "municipal": "Mun.",
+    "processual": "Proc.", "processo": "Proc.", "trabalho": "Trab.", "previdenciário": "Prev.",
+    "tributário": "Trib.", "financeiro": "Fin.", "financeira": "Fin.", "contabilidade": "Cont.",
+    "contábil": "Cont.", "contábeis": "Cont.", "orçamentária": "Orç.", "orçamentário": "Orç.",
+    "orçamento": "Orç.", "informática": "Inf.", "informação": "Inf.", "tecnologia": "Tec.",
+    "língua": "Líng.", "portuguesa": "Port.", "raciocínio": "Rac.", "lógico": "Lóg.",
+    "matemática": "Mat.", "recursos": "Rec.", "materiais": "Mat.", "humanos": "Hum.",
+    "gestão": "Gest.", "serviço": "Serv.", "serviços": "Serv.", "segurança": "Seg.",
+    "responsabilidade": "Resp.", "fiscal": "Fisc.", "introdução": "Intr.", "demonstrações": "Demonstr.",
+    "noções": "Noç.", "princípios": "Princ.", "fundamentais": "Fund.", "organização": "Org.",
+    "organizacional": "Org.", "empresarial": "Empr.", "internacional": "Intern.",
+}
+VOGAIS = set("aeiouáàâãéêíóôõú")
+
+
+def abrev_palavra(p):
+    ref = p.lower()
+    if ref in ABREV:
+        return ABREV[ref]
+    if len(p) <= 5 or not p.isalpha():      # curtas, números e siglas ficam como estão
+        return p
+    if p.isupper():
+        return p
+    corte = 5 if p[3].lower() in VOGAIS else 4   # corta depois de uma consoante
+    return p[:corte] + "."
+
+
+def _partes(nome):
+    sem = re.sub(r"\s*\(.*?\)", "", nome).strip()
+    teve_par = sem != nome.strip()
+    toks = [t.strip(",;:") for t in sem.split() if t not in {"-", "–", "—"}]
+    conteudo = [t for t in toks if t and t.lower() not in STOP]
+    return sem, teve_par, [abrev_palavra(t) for t in conteudo]
+
+
+def abreviar_grupo(nomes):
+    """{nome: nome curto} para irmãos (mesmo pai). Só abrevia nomes longos; garante nomes curtos distintos."""
+    res, pend = {}, {}
+    for n in nomes:
+        sem, par, abr = _partes(n)
+        if not abr:
+            res[n] = n
+        elif len(sem) <= MAX_CURTO:
+            res[n] = sem + ("…" if par else "")
+        else:
+            completo = " ".join(abr)
+            if len(completo) <= MAX_ABREV:
+                res[n] = completo.rstrip(".") + "…" if par else completo
+            else:
+                pend[n] = (abr, par)
+    usados = Counter(res.values())
+    k = min(MIN_PALAVRAS, max((len(a) for a, _ in pend.values()), default=0))
+    ativos = dict(pend)
+    while ativos:
+        cand = {}
+        for n, (abr, par) in ativos.items():
+            if k >= len(abr):
+                cand[n] = " ".join(abr).rstrip(".") + "…" if par else " ".join(abr)
+            else:
+                cand[n] = " ".join(abr[:k]).rstrip(".") + "…"
+        cont = Counter(cand.values())
+        for n, c in list(cand.items()):
+            if cont[c] == 1 and usados[c] == 0:
+                res[n] = c; usados[c] += 1; del ativos[n]
+        if ativos and all(k >= len(a) for a, _ in ativos.values()):
+            break
+        k += 1
+    for n in ativos:           # sem como diferenciar: mantém o nome inteiro
+        res[n] = n
+    dup = {v for v, c in Counter(res.values()).items() if c > 1}
+    for n, v in list(res.items()):
+        if v in dup:
+            res[n] = n
+    return res
+
+
+def rotulos_curtos(mapa):
+    """{rótulo completo: rótulo curto}. Só o último nível fica sem abreviar."""
+    prefixos = {cam[:k] for cam in mapa.values() for k in range(1, len(cam) + 1)}
+    grupos = {}
+    for p in prefixos:
+        grupos.setdefault(p[:-1], []).append(p[-1])
+    curto = {}
+    for pai, nomes in grupos.items():
+        for n, c in abreviar_grupo(nomes).items():
+            curto[pai + (n,)] = c
+    return {rot: " › ".join([curto[cam[:j]] for j in range(1, len(cam))] + [cam[-1]]) for rot, cam in mapa.items()}
+
+
+@st.cache_data
+def curtos():
+    """{rótulo completo: rótulo abreviado} de todos os assuntos (níveis 2 a 5)."""
+    return rotulos_curtos(nos_assunto())
+
+
 # ───────────────────────────── filtros em cascata ─────────────────────────────
 def universo(df, ignorar=None):
     """Questões que passam por todos os filtros (exceto, opcionalmente, o de chave `ignorar`)."""
@@ -159,7 +267,7 @@ def limpar_filtros():
 def barra_lateral(df):
     s = st.session_state
     padroes = {"f_orgao": [], "f_cargo": [], "f_ano": [], "f_materia": "Todas",
-               "f_anuladas": True, "f_destaques": [], "pagina": "🥧 Pizza"}
+               "f_anuladas": True, "destaques": [], "pagina": "🥧 Pizza"}
     for k, v in padroes.items():
         s.setdefault(k, list(v) if isinstance(v, list) else v)
 
@@ -204,14 +312,6 @@ def barra_lateral(df):
 
     sb.checkbox("Incluir questões anuladas", key="f_anuladas")
     sb.button("Limpar filtros", on_click=limpar_filtros)
-
-    sb.markdown("---")
-    sb.header("⭐ Destaques")
-    sb.multiselect(
-        "Destacar assuntos (apenas para gráfico de barras)",
-        list(nos_assunto().keys()), key="f_destaques",
-        placeholder="Digite para buscar um assunto",
-    )
 
 
 # ───────────────────────────── cálculos dos gráficos ─────────────────────────────
@@ -289,6 +389,14 @@ def figura_pizza(pz):
     return fig
 
 
+def passo_eixo(maximo):
+    """Passo "redondo" para o eixo (no máximo ~8 marcas)."""
+    for p in (0.5, 1, 2, 5, 10, 20, 25, 50):
+        if maximo / p <= 8:
+            return p
+    return 50
+
+
 def figura_barras(final, total, n_outras, nomes_dest, unidade):
     cats = list(final.index)
     cor = {n: PALETA_DESTAQUE[i % len(PALETA_DESTAQUE)] for i, n in enumerate(nomes_dest)}
@@ -303,19 +411,23 @@ def figura_barras(final, total, n_outras, nomes_dest, unidade):
                            ": %{customdata} questões · %{x:.1f}% do universo<extra></extra>"),
         )
     tot = final.sum(axis=1)
-    rot = []
+    pct = tot / total * 100
+    maximo = float(pct.max())
+    passo = passo_eixo(maximo)
+    marcas = [round(i * passo, 4) for i in range(int(maximo // passo) + 1)]
+    # o valor de cada barra vai no rótulo do eixo vertical, para a maior barra poder tocar a borda direita
+    rotulos = []
     for g in cats:
-        extra = f" ({n_outras} {unidade})" if g == "Outras" else ""
-        rot.append(f"{fmt_pct(tot[g] / total * 100)} · {int(tot[g])}{extra}")
-    fig.add_scatter(x=(tot / total * 100).tolist(), y=cats, mode="text", text=rot,
-                    textposition="middle right", showlegend=False, hoverinfo="skip", cliponaxis=False)
+        extra = f" · {n_outras} {unidade}" if g == "Outras" else ""
+        rotulos.append(f"{g}<br>{fmt_pct(pct[g])} · {int(tot[g])} q.{extra}")
     fig.update_layout(
         barmode="stack", bargap=0.18, showlegend=False, separators=",.",
-        height=max(320, 54 * len(cats) + 90), margin=dict(l=10, r=40, t=10, b=40),
+        height=max(320, 64 * len(cats) + 90), margin=dict(l=10, r=12, t=10, b=40),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(range=[0, 100], tickvals=list(range(0, 101, 10)), ticksuffix="%",
+        xaxis=dict(range=[0, maximo], tickvals=marcas, ticksuffix="%",
+                   tickformat=".1f" if passo < 1 else ".0f",
                    gridcolor="rgba(128,128,128,.25)", zeroline=False),
-        yaxis=dict(autorange="reversed", automargin=True),
+        yaxis=dict(autorange="reversed", automargin=True, tickmode="array", tickvals=cats, ticktext=rotulos),
     )
     return fig, cor
 
@@ -416,13 +528,31 @@ def pagina_pizza(df_u):
                               for r in pz.itertuples()], coluna=True))
 
 
+def seletor_destaques():
+    """Multiselect em largura total. O widget só existe nesta página, então a seleção fica
+    guardada em st.session_state["destaques"] para sobreviver à troca de página."""
+    s = st.session_state
+    if "w_destaques" not in s:
+        s["w_destaques"] = list(s["destaques"])
+    rot = curtos()
+    s["w_destaques"] = [r for r in s["w_destaques"] if r in rot]
+    st.multiselect(
+        "Destacar assuntos (apenas para gráfico de barras)", list(rot.keys()), key="w_destaques",
+        format_func=lambda r: rot[r], placeholder="Digite para buscar um assunto…",
+        help="Caminho: Matéria › nível 2 › … › último nível. Nomes longos aparecem abreviados, "
+             "exceto o último nível. Escolher um nível intermediário destaca todas as questões abaixo dele.",
+    )
+    s["destaques"] = list(s["w_destaques"])
+
+
 def pagina_barras(df_u):
     por_materia = st.session_state["f_materia"] == "Todas"
     coluna = "materia" if por_materia else "nivel2"
     unidade = "matérias" if por_materia else "assuntos"
     st.subheader("📊 Matérias" if por_materia
                  else f"📊 Assuntos (nível 2) — {st.session_state['f_materia']}")
-    destaques = nomes_destaques(st.session_state["f_destaques"])
+    seletor_destaques()
+    destaques = nomes_destaques(st.session_state["destaques"])
     final, n_outras, nomes_dest = dados_barras(df_u, coluna, destaques)
     fig, cor = figura_barras(final, len(df_u), n_outras, nomes_dest, unidade)
     mostrar_plotly(fig)
