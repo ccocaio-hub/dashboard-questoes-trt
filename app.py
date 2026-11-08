@@ -575,7 +575,7 @@ def main():
     st.title("📊 Painel Interativo de Questões")
     st.markdown(
         "**Banco de dados de questões previamente tratado com os seguintes filtros:**  \n"
-        "Banca: FCC  \nÓrgãos: TRT (todos) \nCargos: Técnico e Analista"
+        "Banca: FCC  \nÓrgãos: TRT (todos)  \nCargos: Técnico e Analista"
     )
     try:
         df = carregar()
