@@ -140,8 +140,8 @@ MIN_PALAVRAS = 2   # ao cortar, mantém pelo menos 2 palavras (ex.: "Dir. Adm…
 STOP = {"de", "da", "do", "das", "dos", "e", "em", "na", "no", "nas", "nos", "a", "o", "as", "os",
         "para", "por", "com", "ao", "à", "ou"}
 ABREV = {
-    "direito": "Dir.", "direitos": "Dir.", "administração": "Adm.", "administrativo": "Adm.",
-    "administrativa": "Adm.", "constitucional": "Const.", "geral": "Ger.", "pública": "Púb.",
+    "direito": "Dir", "direitos": "Dir", "administração": "Adm", "administrativo": "Adm",
+    "administrativa": "Adm", "constitucional": "Const", "geral": "Ger.", "pública": "Púb.",
     "público": "Púb.", "públicos": "Púb.", "públicas": "Púb.", "legislação": "Legisl.",
     "específica": "Espec.", "específico": "Espec.", "tribunais": "Trib.", "ministérios": "Min.",
     "federais": "Fed.", "federal": "Fed.", "estadual": "Est.", "municipal": "Mun.",
