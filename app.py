@@ -62,6 +62,11 @@ CSS = """
 .tt .ch{margin-left:1.1rem;border-left:1px solid rgba(128,128,128,.3)}
 .tt .raiz>summary,.tt .raiz>.fol{font-weight:600}
 .tt .outras>summary .nm,.tt .fol.outras .nm{font-style:italic}
+/* balão do mouse (hover) do Plotly: fundo branco e texto preto em qualquer tema/navegador */
+.js-plotly-plot .hoverlayer .hovertext rect,
+.js-plotly-plot .hoverlayer .hovertext path{fill:#ffffff !important;fill-opacity:1 !important;stroke:#888888 !important}
+.js-plotly-plot .hoverlayer .hovertext text,
+.js-plotly-plot .hoverlayer .hovertext tspan{fill:#000000 !important;stroke:none !important}
 </style>
 """
 
