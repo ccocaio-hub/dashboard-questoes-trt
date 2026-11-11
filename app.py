@@ -6,9 +6,12 @@ Precisa: questoes_completo.xlsx (aba "Questões") na mesma pasta deste arquivo.
 Libs:    streamlit, pandas, openpyxl, plotly
 """
 import html
+import math
 import re
+import statistics
 import unicodedata
-from collections import Counter
+import zlib
+from collections import Counter, defaultdict
 from io import BytesIO
 from pathlib import Path
 
@@ -24,6 +27,12 @@ ABA = "Questões"
 
 LIMIAR_OUTRAS = 3.0   # % mínimo do universo para uma matéria (ou assunto nível 2) ter fatia/barra própria
 COR_OUTRAS = "#7f8c8d"
+PAGINAS = ["🥧 Pizza", "📊 Barras", "⚖️ Comparar"]
+PAG_COMPARAR = "⚖️ Comparar"
+CMP_CORES = ["#4e79a7", "#f28e2b", "#59a14f", "#b07aa1"]            # uma cor por cenário
+CMP_MODOS = ["Filtros próprios", "Total da base", "Resto (fora do cenário 1)"]
+CMP_CAMPOS = [("escol", "escolaridade", "Escolaridade"), ("orgao", "orgao", "Órgão"),
+              ("cargo", "Cargo", "Cargo"), ("ano", "ano", "Ano")]
 HOVER = dict(bgcolor="white", bordercolor="#888888", font=dict(color="black", size=13))  # balão do mouse
 COR_DEMAIS = "#8395a7"
 PALETA = [
@@ -67,6 +76,17 @@ CSS = """
 .js-plotly-plot .hoverlayer .hovertext path{fill:#ffffff !important;fill-opacity:1 !important;stroke:#888888 !important}
 .js-plotly-plot .hoverlayer .hovertext text,
 .js-plotly-plot .hoverlayer .hovertext tspan{fill:#000000 !important;stroke:none !important}
+/* tabela de comparação */
+.tc{overflow-x:auto}
+.tc .cab,.tc summary,.tc .fol{min-width:640px}
+.tt .c{width:122px;text-align:right;white-space:nowrap}
+.tt .c small{opacity:.6}
+.tt .d{width:78px;text-align:right;white-space:nowrap}
+.tt .d.pos{color:#2e9e5b;font-weight:600}
+.tt .d.neg{color:#e0554f;font-weight:600}
+.tt .d.ruido{opacity:.5;font-weight:400}
+.tt .d.nd,.tt .d.z{opacity:.6;font-weight:400}
+.tt .cab .c{overflow:hidden;text-overflow:ellipsis}
 </style>
 """
 
@@ -297,7 +317,10 @@ def barra_lateral(df):
             break
 
     sb = st.sidebar
-    sb.radio("Gráfico", ["🥧 Pizza", "📊 Barras"], key="pagina")
+    pagina = sb.radio("Gráfico", PAGINAS, key="pagina")
+    if pagina == PAG_COMPARAR:
+        sb.caption("Na página Comparar, cada cenário tem os seus próprios filtros.")
+        return
     sb.markdown("---")
     sb.header("🎯 Filtros")
 
@@ -656,6 +679,433 @@ def pagina_barras(df_u):
         st.caption("Escolha assuntos em “Destacar assuntos” (barra lateral) para segmentá-los nas barras.")
 
 
+# ───────────────────────────── comparação de cenários ─────────────────────────────
+def ck(i, campo):
+    return f"cmp_{i}_{campo}"
+
+
+def chaves_persistentes():
+    """Chaves cujo valor deve sobreviver quando o widget some (troca de página)."""
+    ks = list(CHAVES) + ["f_anuladas", "w_destaques", "tf_id", "tf_assunto"] + [c for c, *_ in TABELA_FILTROS]
+    ks += ["cmp_n", "cmp_anuladas", "cmp_materia", "cmp_k"]
+    for i in range(4):
+        ks += [ck(i, campo) for campo, *_ in CMP_CAMPOS] + [f"cmp_{i}_modo", f"cmp_{i}_nome"]
+    return ks
+
+
+def cmp_inicializar():
+    s = st.session_state
+    for k, v in {"cmp_n": 2, "cmp_anuladas": True, "cmp_materia": "Todas", "cmp_k": 1}.items():
+        s.setdefault(k, v)
+    for i in range(4):
+        for campo, *_ in CMP_CAMPOS:
+            s.setdefault(ck(i, campo), [])
+        s.setdefault(f"cmp_{i}_modo", CMP_MODOS[0])
+        s.setdefault(f"cmp_{i}_nome", "")
+
+
+def cmp_base(df):
+    return df if st.session_state["cmp_anuladas"] else df[df["anulada"] == 0]
+
+
+def cmp_modo(i):
+    return st.session_state[f"cmp_{i}_modo"] if i > 0 else CMP_MODOS[0]
+
+
+def cmp_filtrar(base, i, ignorar=None):
+    s = st.session_state
+    m = pd.Series(True, index=base.index)
+    for campo, col, _ in CMP_CAMPOS:
+        if campo != ignorar and s[ck(i, campo)]:
+            m &= base[col].isin(s[ck(i, campo)])
+    return base[m]
+
+
+def cmp_limpar_selecoes(df):
+    """Descarta seleções que deixaram de existir (da direita para a esquerda), em cada cenário."""
+    s = st.session_state
+    base = cmp_base(df)
+    for i in range(s["cmp_n"]):
+        for _ in range(4):
+            mudou = False
+            for campo, col, _ in reversed(CMP_CAMPOS):
+                validos = set(cmp_filtrar(base, i, ignorar=campo)[col].unique())
+                novo = [v for v in s[ck(i, campo)] if v in validos]
+                if novo != s[ck(i, campo)]:
+                    s[ck(i, campo)], mudou = novo, True
+            if not mudou:
+                break
+
+
+def cmp_copiar(i):
+    """Copia os filtros da barra lateral (páginas Pizza/Barras) para o cenário i."""
+    s = st.session_state
+    for campo, chave in (("escol", "f_escol"), ("orgao", "f_orgao"), ("cargo", "f_cargo"), ("ano", "f_ano")):
+        s[ck(i, campo)] = list(s.get(chave, []))
+
+
+def cmp_universos(df, com_materia=True):
+    s = st.session_state
+    base = cmp_base(df)
+    univs = []
+    for i in range(s["cmp_n"]):
+        modo = cmp_modo(i)
+        if modo == CMP_MODOS[1]:
+            u = base
+        elif modo == CMP_MODOS[2]:
+            u = base.drop(univs[0].index, errors="ignore")
+        else:
+            u = cmp_filtrar(base, i)
+        univs.append(u)
+    if com_materia and s["cmp_materia"] != "Todas":
+        univs = [u[u["materia"] == s["cmp_materia"]] for u in univs]
+    return univs
+
+
+def anos_txt(anos):
+    anos = sorted({int(a) for a in anos})
+    faixas, ini, prev = [], None, None
+    for a in anos:
+        if ini is None:
+            ini = prev = a
+        elif a == prev + 1:
+            prev = a
+        else:
+            faixas.append((ini, prev))
+            ini = prev = a
+    if ini is not None:
+        faixas.append((ini, prev))
+    return ", ".join(str(a) if a == b else (f"{a}, {b}" if b == a + 1 else f"{a}–{b}") for a, b in faixas)
+
+
+def cmp_rotulo_auto(i):
+    s = st.session_state
+    modo = cmp_modo(i)
+    if modo == CMP_MODOS[1]:
+        return "Total da base"
+    if modo == CMP_MODOS[2]:
+        return "Resto (fora do cenário 1)"
+    partes = []
+    if s[ck(i, "escol")]:
+        partes.append("/".join(s[ck(i, "escol")]))
+    if s[ck(i, "cargo")]:
+        partes.append("/".join(c.split()[0] for c in s[ck(i, "cargo")]))
+    org = s[ck(i, "orgao")]
+    if org:
+        partes.append(org[0] if len(org) == 1 else f"{len(org)} órgãos")
+    if s[ck(i, "ano")]:
+        partes.append(anos_txt(s[ck(i, "ano")]))
+    return " · ".join(partes) or "Todas as questões"
+
+
+def cmp_rotulos(n):
+    s = st.session_state
+    rot = []
+    for i in range(n):
+        base = s[f"cmp_{i}_nome"].strip() or cmp_rotulo_auto(i)
+        nome, k = base, 2
+        while nome in rot:
+            nome, k = f"{base} ({k})", k + 1
+        rot.append(nome)
+    return rot
+
+
+# ----- estatísticas: contagens por nó da árvore de assuntos, por cenário e por prova -----
+def construir_stats(univs):
+    """cnt[prefixo][cenário][prova] = nº de questões; provas[cenário][prova] = tamanho da prova no universo.
+    "Prova" = (escolaridade, órgão, ano, cargo)."""
+    cnt, provas = {}, []
+    for si, u in enumerate(univs):
+        chaves = list(zip(u["escolaridade"], u["orgao"], u["ano"], u["Cargo"]))
+        tam = Counter(chaves)
+        provas.append(dict(tam))
+        for linha, k in zip(u[NIVEIS].itertuples(index=False), chaves):
+            c = caminho(linha)
+            for j in range(1, len(c) + 1):
+                lst = cnt.setdefault(c[:j], [defaultdict(int) for _ in univs])
+                lst[si][k] += 1
+    return cnt, provas
+
+
+def n_no(cnt, pref, si):
+    return sum(cnt[pref][si].values()) if pref in cnt else 0
+
+
+def partilhas(cnt, provas, prefs, si):
+    """Fração de cada prova do cenário si que pertence aos nós `prefs`."""
+    return [sum(cnt[p][si].get(k, 0) for p in prefs if p in cnt) / tam for k, tam in provas[si].items()]
+
+
+def diferenca(cnt, provas, tot, prefs, ref, k):
+    """(diferença em p.p. do cenário k contra o ref, é maior que ≈2 erros-padrão entre provas?)
+    O 2º valor é None quando não dá para estimar (menos de 2 provas em algum cenário)."""
+    if not tot[ref] or not tot[k]:
+        return None, None
+    d = (sum(n_no(cnt, p, k) for p in prefs) / tot[k] - sum(n_no(cnt, p, ref) for p in prefs) / tot[ref]) * 100
+    a, b = partilhas(cnt, provas, prefs, ref), partilhas(cnt, provas, prefs, k)
+    if len(a) < 2 or len(b) < 2:
+        return d, None
+    if abs(d) < 1e-9:
+        return d, False
+    se = math.sqrt(statistics.variance(a) / len(a) + statistics.variance(b) / len(b)) * 100
+    return d, abs(d) >= 2 * se
+
+
+def grupos_cmp(cnt, tot, nivel):
+    """Grupos do nível (1 = matéria, 2 = nível 2): fortes (>= limiar em algum cenário) e pequenos (vão para 'Outras')."""
+    todos = [p for p in cnt if len(p) == nivel]
+    mx = {p: max(n_no(cnt, p, si) / tot[si] * 100 for si in range(len(tot)) if tot[si]) for p in todos}
+    fortes = sorted([p for p in todos if mx[p] >= LIMIAR_OUTRAS], key=lambda p: (-mx[p], p))
+    pequenos = sorted([p for p in todos if mx[p] < LIMIAR_OUTRAS], key=lambda p: (-mx[p], p))
+    return fortes, pequenos
+
+
+# ----- figuras -----
+def figura_comparacao(rot, cats, pct_cat, qtd_cat):
+    N = len(rot)
+    maxp = max(max(v) for v in pct_cat.values())
+    passo = passo_eixo(maxp)
+    marcas = [round(i * passo, 4) for i in range(int(maxp // passo) + 1)]
+    fig = go.Figure()
+    for si in range(N):
+        fig.add_bar(
+            y=cats, x=[pct_cat[c][si] for c in cats], name=rot[si], orientation="h",
+            marker=dict(color=CMP_CORES[si]), customdata=[qtd_cat[c][si] for c in cats],
+            text=[fmt_pct(pct_cat[c][si]) for c in cats], textposition="outside", cliponaxis=False,
+            hovertemplate="<b>%{y}</b><br>" + html.escape(rot[si]) + ": %{x:.1f}% · %{customdata} questões<extra></extra>",
+        )
+    fig.update_layout(
+        barmode="group", bargap=0.22, bargroupgap=0.05, showlegend=False, separators=",.",
+        height=max(360, len(cats) * (N * 26 + 18) + 80), margin=dict(l=10, r=80, t=10, b=40),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(range=[0, maxp], tickvals=marcas, ticksuffix="%", tickformat=".1f" if passo < 1 else ".0f",
+                   gridcolor="rgba(128,128,128,.25)", zeroline=False),
+        yaxis=dict(autorange="reversed", automargin=True), hoverlabel=HOVER,
+    )
+    fig.update_traces(hoverlabel=HOVER)
+    return fig
+
+
+def figura_diferenca(k, cats, dif):
+    ordem = sorted([c for c in cats if c != "Outras"], key=lambda c: -dif[c][0])
+    if "Outras" in cats:
+        ordem.append("Outras")
+    x = [dif[c][0] for c in ordem]
+    cor = [CMP_CORES[k] if v >= 0 else CMP_CORES[0] for v in x]
+    opac = [1.0 if dif[c][1] else 0.35 for c in ordem]
+    txt = [("+" if v > 0.05 else "−" if v < -0.05 else "") + f"{abs(v):.1f}".replace(".", ",") + " p.p." for v in x]
+    m = max([abs(v) for v in x] + [1.0]) * 1.3
+    fig = go.Figure(go.Bar(
+        y=ordem, x=x, orientation="h", marker=dict(color=cor, opacity=opac), text=txt,
+        textposition="outside", cliponaxis=False, hovertemplate="<b>%{y}</b><br>%{text}<extra></extra>",
+    ))
+    fig.update_layout(
+        showlegend=False, bargap=0.25, separators=",.", height=max(320, 46 * len(ordem) + 90),
+        margin=dict(l=10, r=30, t=10, b=40), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(range=[-m, m], ticksuffix=" p.p.", tickformat=".1f" if m < 2 else ".0f", gridcolor="rgba(128,128,128,.25)",
+                   zeroline=True, zerolinecolor="rgba(128,128,128,.8)", zerolinewidth=2),
+        yaxis=dict(autorange="reversed", automargin=True), hoverlabel=HOVER,
+    )
+    fig.update_traces(hoverlabel=HOVER)
+    return fig
+
+
+def figura_pontos(rot, cats, prefs_cat, cnt, provas, tot):
+    N = len(rot)
+    fig = go.Figure()
+    xmax = 1.0
+    for si in range(N):
+        off = (si - (N - 1) / 2) * 0.26
+        xs, ys, txt = [], [], []
+        for ci, cat in enumerate(cats):
+            for k, tam in provas[si].items():
+                c = sum(cnt[p][si].get(k, 0) for p in prefs_cat[cat] if p in cnt)
+                v = c / tam * 100
+                jit = ((zlib.crc32(str(k).encode()) % 9) - 4) * 0.02
+                xs.append(v)
+                ys.append(ci + off + jit)
+                txt.append(f"{k[1]} {k[2]} · {k[3].split()[0]} · {k[0]}<br>{fmt_pct(v)} ({c} de {tam})")
+        xmax = max([xmax] + xs)
+        fig.add_scatter(x=xs, y=ys, mode="markers", name=rot[si], text=txt, hovertemplate="%{text}<extra></extra>",
+                        marker=dict(color=CMP_CORES[si], size=7, opacity=0.55))
+        pooled = [sum(n_no(cnt, p, si) for p in prefs_cat[cat]) / tot[si] * 100 for cat in cats]
+        fig.add_scatter(x=pooled, y=[ci + off for ci in range(len(cats))], mode="markers", name=f"{rot[si]} (total)",
+                        text=[f"{rot[si]}<br>cenário inteiro: {fmt_pct(v)}" for v in pooled],
+                        hovertemplate="%{text}<extra></extra>",
+                        marker=dict(color=CMP_CORES[si], size=13, symbol="diamond", line=dict(color="white", width=1.5)))
+    passo = passo_eixo(xmax)
+    fig.update_layout(
+        showlegend=False, separators=",.", height=max(360, 58 * len(cats) + 90), margin=dict(l=10, r=30, t=10, b=40),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(range=[0, xmax * 1.05], tickvals=[round(i * passo, 4) for i in range(int(xmax // passo) + 1)],
+                   ticksuffix="%", tickformat=".1f" if passo < 1 else ".0f", gridcolor="rgba(128,128,128,.25)", zeroline=False),
+        yaxis=dict(tickmode="array", tickvals=list(range(len(cats))), ticktext=cats, range=[len(cats) - 0.5, -0.5],
+                   gridcolor="rgba(128,128,128,.15)", automargin=True),
+        hoverlabel=HOVER,
+    )
+    fig.update_traces(hoverlabel=HOVER)
+    return fig
+
+
+def arvore_cmp_html(rot, cnt, provas, tot, por_materia):
+    """Menu expansível com os cenários lado a lado: % (n) de cada um e diferença contra o cenário 1."""
+    N = len(rot)
+    filhos = {}
+    for p in cnt:
+        filhos.setdefault(p[:-1], []).append(p)
+    corte = 1 if por_materia else 2
+
+    def pct_de(prefs, si):
+        return sum(n_no(cnt, p, si) for p in prefs) / tot[si] * 100 if tot[si] else 0.0
+
+    def maxpct(prefs):
+        return max(pct_de(prefs, si) for si in range(N))
+
+    def celulas(prefs):
+        out = ""
+        for si in range(N):
+            n = sum(n_no(cnt, p, si) for p in prefs)
+            out += f'<span class="c">{fmt_pct(pct_de(prefs, si))}<small> ({fmt_int(n)})</small></span>'
+        for si in range(1, N):
+            d, nota = diferenca(cnt, provas, tot, prefs, 0, si)
+            if d is None:
+                txt, cl = "–", "nd"
+            else:
+                txt = ("+" if d > 0.05 else "−" if d < -0.05 else "") + f"{abs(d):.1f}".replace(".", ",")
+                cl = "pos" if d > 0.05 else "neg" if d < -0.05 else "z"
+                if not nota:                      # dentro do ruído ou sem provas suficientes para estimar
+                    cl += " ruido"
+            out += f'<span class="d {cl}">{txt}</span>'
+        return out
+
+    def render(prefixos, agrupar, topo=False):
+        itens = [{"nome": p[-1], "prefs": [p], "kids": filhos.get(p, []), "outras": False} for p in prefixos]
+        itens.sort(key=lambda it: (-maxpct(it["prefs"]), it["nome"]))
+        if agrupar:
+            fortes = [it for it in itens if maxpct(it["prefs"]) >= LIMIAR_OUTRAS]
+            peq = [it for it in itens if maxpct(it["prefs"]) < LIMIAR_OUTRAS]
+            itens = fortes
+            if peq:
+                membros = [p for it in peq for p in it["prefs"]]
+                itens.append({"nome": "Outras", "prefs": membros, "kids": membros, "outras": True})
+        partes = []
+        for it in itens:
+            cl = ("raiz " if topo else "no ") + ("outras" if it["outras"] else "")
+            nome, cel = html.escape(it["nome"]), celulas(it["prefs"])
+            if it["kids"]:
+                ag = (not it["outras"]) and len(it["kids"][0]) == corte
+                abre = " open" if (topo and len(itens) == 1) else ""
+                partes.append(f'<details class="{cl}"{abre}><summary><span class="nm">{nome}</span>{cel}</summary>'
+                              f'<div class="ch">{render(it["kids"], ag)}</div></details>')
+            else:
+                partes.append(f'<div class="fol {cl}"><span class="nm">{nome}</span>{cel}</div>')
+        return "".join(partes)
+
+    cab = '<div class="cab"><span class="nm">Matéria / assunto</span>'
+    for i, r in enumerate(rot):
+        cab += (f'<span class="c" title="{html.escape(r)}"><span class="lg-c" style="background:{CMP_CORES[i]};'
+                f'display:inline-block;margin-right:5px;vertical-align:middle"></span>{html.escape(r)}</span>')
+    for i in range(1, N):
+        cab += f'<span class="d" title="Cenário {i + 1} menos cenário 1, em pontos percentuais">Δ {i + 1}−1</span>'
+    cab += "</div>"
+    return f'<div class="tt tc">{cab}{render(filhos.get((), []), por_materia, topo=True)}</div>'
+
+
+# ----- página -----
+def pagina_comparar(df):
+    s = st.session_state
+    cmp_inicializar()
+    cmp_limpar_selecoes(df)
+    base = cmp_base(df)
+
+    univs0 = cmp_universos(df, com_materia=False)
+    idx = set().union(*[set(u.index) for u in univs0])
+    cont_mat = df.loc[list(idx), "materia"].value_counts() if idx else pd.Series(dtype=int)
+    if s["cmp_materia"] != "Todas" and s["cmp_materia"] not in cont_mat.index:
+        s["cmp_materia"] = "Todas"
+    n = s["cmp_n"]
+    if not 1 <= s["cmp_k"] < n:
+        s["cmp_k"] = 1
+
+    univs = cmp_universos(df)
+    tot = [len(u) for u in univs]
+    rot = cmp_rotulos(n)
+    cnt, provas = construir_stats(univs)
+
+    st.subheader("⚖️ Comparar cenários")
+    st.caption("Cada cenário tem os seus próprios filtros. Os percentuais são sempre relativos ao universo do próprio cenário.")
+    c1, c2, c3 = st.columns([1.3, 2.6, 1.4])
+    c1.radio("Número de cenários", [2, 3, 4], key="cmp_n", horizontal=True)
+    c2.selectbox("Matéria (opcional)", ["Todas"] + cont_mat.index.tolist(), key="cmp_materia",
+                 format_func=lambda v: "Todas" if v == "Todas" else f"{v} ({cont_mat[v]})")
+    c2.caption("⚠️ Apenas uma matéria por vez. Com uma matéria, a comparação passa a ser pelos assuntos de nível 2 dela.")
+    c3.checkbox("Incluir questões anuladas", key="cmp_anuladas")
+
+    cols = st.columns(n)
+    for i, c in enumerate(cols):
+        with c:
+            st.markdown(f"<span style='color:{CMP_CORES[i]}'>■</span> **Cenário {i + 1}**", unsafe_allow_html=True)
+            if i > 0:
+                st.radio(f"Fonte do cenário {i + 1}", CMP_MODOS, key=f"cmp_{i}_modo", label_visibility="collapsed")
+            if cmp_modo(i) == CMP_MODOS[0]:
+                for campo, col, rotulo in CMP_CAMPOS:
+                    cont = cmp_filtrar(base, i, ignorar=campo)[col].value_counts()
+                    ordem = chave_orgao if col == "orgao" else ((lambda a: -a) if col == "ano" else str)
+                    st.multiselect(rotulo, sorted(cont.index.tolist(), key=ordem), key=ck(i, campo),
+                                   format_func=lambda v, cont=cont: f"{v} ({cont[v]})", placeholder="Todos")
+                st.button("↩ usar os filtros das outras páginas", key=f"cmp_{i}_copiar", on_click=cmp_copiar, args=(i,))
+            st.text_input("Nome (opcional)", key=f"cmp_{i}_nome", placeholder=cmp_rotulo_auto(i))
+            u = univs[i]
+            st.caption(f"{fmt_int(len(u))} questões · {len(provas[i])} provas · {u['orgao'].nunique()} órgãos · "
+                       f"{anos_txt(u['ano'].unique()) if len(u) else '–'}")
+
+    vazios = [rot[i] for i in range(n) if tot[i] == 0]
+    if vazios:
+        st.warning("Cenário sem questões: " + "; ".join(vazios))
+        return
+
+    por_materia = s["cmp_materia"] == "Todas"
+    fortes, pequenos = grupos_cmp(cnt, tot, 1 if por_materia else 2)
+    prefs_cat = {p[-1]: [p] for p in fortes}
+    if pequenos:
+        prefs_cat["Outras"] = pequenos
+    cats = list(prefs_cat)
+    qtd_cat = {c: [sum(n_no(cnt, p, si) for p in prefs_cat[c]) for si in range(n)] for c in cats}
+    pct_cat = {c: [qtd_cat[c][si] / tot[si] * 100 for si in range(n)] for c in cats}
+
+    st.markdown("---")
+    st.subheader("📊 Distribuição por matéria (% de cada cenário)" if por_materia
+                 else f"📊 Distribuição por assunto (nível 2) — {s['cmp_materia']}")
+    html_md(legenda_html([(CMP_CORES[i], rot[i], f"{fmt_int(tot[i])} questões") for i in range(n)]))
+    mostrar_plotly(figura_comparacao(rot, cats, pct_cat, qtd_cat))
+    st.caption(f"“Outras” reúne o que tem menos de {fmt_pct(LIMIAR_OUTRAS, 0)} em todos os cenários.")
+
+    st.markdown("---")
+    st.subheader("↔️ Diferença entre cenários (pontos percentuais)")
+    k = 1
+    if n > 2:
+        k = st.selectbox("Mostrar a diferença do cenário", list(range(1, n)), key="cmp_k",
+                         format_func=lambda x: f"Cenário {x + 1} − Cenário 1 ({rot[x]})")
+    dif = {c: diferenca(cnt, provas, tot, prefs_cat[c], 0, k) for c in cats}
+    html_md(legenda_html([(CMP_CORES[k], f"Mais frequente em: {rot[k]}", ""), (CMP_CORES[0], f"Mais frequente em: {rot[0]}", "")]))
+    mostrar_plotly(figura_diferenca(k, cats, dif))
+    st.caption("Barras claras: diferença dentro da variação entre provas (menos de ≈2 erros-padrão, tomando cada prova como "
+               "uma observação, ou sem provas suficientes para estimar). Barras sólidas: diferença maior que essa variação. "
+               "Com poucas provas por cenário, trate como indício.")
+
+    st.markdown("---")
+    st.subheader("🔵 Variação entre provas")
+    st.caption("Cada ponto é uma prova (órgão · ano · cargo · escolaridade) e mostra o % daquele grupo dentro da prova; "
+               "o losango é o % do cenário inteiro. Pontos espalhados indicam que a diferença depende da prova.")
+    mostrar_plotly(figura_pontos(rot, cats, prefs_cat, cnt, provas, tot))
+
+    st.markdown("---")
+    st.subheader("📚 Matérias e assuntos — comparação")
+    st.caption("Cada célula mostra % (nº de questões). Δ = cenário − cenário 1, em pontos percentuais "
+               "(verde: mais frequente no cenário; vermelho: menos; esmaecido: dentro da variação entre provas ou não estimável).")
+    html_md(arvore_cmp_html(rot, cnt, provas, tot, por_materia))
+
+
 # ───────────────────────────── página ─────────────────────────────
 def main():
     html_md(CSS)
@@ -670,7 +1120,14 @@ def main():
         st.error(f"Não foi possível carregar {ARQUIVO.name}: {e}")
         st.stop()
 
+    for k in chaves_persistentes():          # mantém o estado dos filtros de páginas que não estão na tela
+        if k in st.session_state:
+            st.session_state[k] = st.session_state[k]
+
     barra_lateral(df)
+    if st.session_state["pagina"] == PAG_COMPARAR:
+        pagina_comparar(df)
+        return
     df_u = universo(df)
 
     st.markdown("---")
